@@ -10,17 +10,32 @@ st.title("Customer & Orders Analytics")
 st.caption("Explore sales, profitability, seasonality, and returns across 2023–2026.")
 DATA_DIR = Path(__file__).resolve().parent
 
-@st.cache_data
-def read_csv(path):
+@st.cache_data(show_spinner=False)
+def parse_csv_bytes(raw: bytes, filename: str):
+    """Parse from the beginning every time, independent of upload cursor position."""
+    from io import BytesIO
+    last_error = None
     for encoding in ("utf-8-sig", "cp1252", "latin-1"):
         try:
-            frame = pd.read_csv(path, encoding=encoding, dtype={"Postal Code": "string"})
-            frame.columns = (frame.columns.astype(str).str.replace("\ufeff", "", regex=False)
+            frame = pd.read_csv(BytesIO(raw), encoding=encoding, dtype={"Postal Code": "string"})
+            frame.columns = (frame.columns.astype(str)
+                             .str.replace("\ufeff", "", regex=False)
                              .str.replace("ï»¿", "", regex=False).str.strip())
             return frame
-        except UnicodeDecodeError:
-            continue
-    raise ValueError(f"Unable to decode {path}")
+        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+            last_error = exc
+    raise ValueError(f"Unable to parse {filename}: {last_error}")
+
+def read_csv(source, filename):
+    if hasattr(source, "getvalue"):
+        # UploadedFile is a stream; reading it without resetting can start mid-file.
+        # getvalue() always returns the entire uploaded file, irrespective of cursor.
+        raw = source.getvalue()
+    else:
+        raw = Path(source).read_bytes()
+    if not raw:
+        raise ValueError(f"{filename} is empty. Re-upload the original CSV.")
+    return parse_csv_bytes(raw, filename)
 
 @st.cache_data
 def prepare(customers, orders, returns):
@@ -36,7 +51,7 @@ def prepare(customers, orders, returns):
         missing = [col for col in required if col not in table.columns]
         if missing:
             raise ValueError(f"{filename} is missing columns: {missing}. Found columns: {table.columns.tolist()}. "
-                             "Please check that the correct CSV was uploaded for each source.")
+                             "The file may have been read from the middle or may not be the expected CSV. Clear the uploader and re-upload the original file.")
     for col in ("Order Date", "Ship Date"):
         orders[col] = pd.to_datetime(orders[col], errors="coerce", format="%m/%d/%Y")
     for col in ("Sales", "Profit", "Quantity", "Discount"):
@@ -53,7 +68,7 @@ def prepare(customers, orders, returns):
 
 with st.sidebar:
     st.header("Data sources")
-    st.caption("Upload all three CSV files, or keep the bundled example files.")
+    st.caption("Bundled CSV files load by default. Upload a CSV only to replace a bundled file. If a previous upload was corrupted, remove it using the X beside the upload.")
     uploads = {name: st.file_uploader(f"{name.title()} CSV", type="csv", key=name) for name in ("customers", "orders", "returns")}
 
 try:
@@ -63,7 +78,7 @@ try:
         if uploaded is None and not path.exists():
             st.error(f"Missing {name}.csv. Upload it in the sidebar or place it beside app.py.")
             st.stop()
-        tables[name] = read_csv(path)
+        tables[name] = read_csv(path, f"{name}.csv")
     df = prepare(tables["customers"], tables["orders"], tables["returns"])
     if df["Order Date"].notna().sum() == 0:
         raise ValueError("No valid Order Date values were found in orders.csv. Expected dates such as 11/8/2025.")
