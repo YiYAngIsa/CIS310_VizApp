@@ -14,7 +14,10 @@ DATA_DIR = Path(__file__).resolve().parent
 def read_csv(path):
     for encoding in ("utf-8-sig", "cp1252", "latin-1"):
         try:
-            return pd.read_csv(path, encoding=encoding, dtype={"Postal Code": "string"})
+            frame = pd.read_csv(path, encoding=encoding, dtype={"Postal Code": "string"})
+            frame.columns = (frame.columns.astype(str).str.replace("\ufeff", "", regex=False)
+                             .str.replace("ï»¿", "", regex=False).str.strip())
+            return frame
         except UnicodeDecodeError:
             continue
     raise ValueError(f"Unable to decode {path}")
@@ -24,6 +27,16 @@ def prepare(customers, orders, returns):
     customers = customers.copy()
     orders = orders.copy()
     returns = returns.copy()
+    expected = {
+        "customers.csv": (customers, ["Customer ID", "Segment"]),
+        "orders.csv": (orders, ["Order ID", "Customer ID", "Order Date", "Ship Date", "Category", "Sales", "Profit", "Quantity", "Discount"]),
+        "returns.csv": (returns, ["Order ID", "Returned"]),
+    }
+    for filename, (table, required) in expected.items():
+        missing = [col for col in required if col not in table.columns]
+        if missing:
+            raise ValueError(f"{filename} is missing columns: {missing}. Found columns: {table.columns.tolist()}. "
+                             "Please check that the correct CSV was uploaded for each source.")
     for col in ("Order Date", "Ship Date"):
         orders[col] = pd.to_datetime(orders[col], errors="coerce", format="%m/%d/%Y")
     for col in ("Sales", "Profit", "Quantity", "Discount"):
@@ -52,6 +65,8 @@ try:
             st.stop()
         tables[name] = read_csv(path)
     df = prepare(tables["customers"], tables["orders"], tables["returns"])
+    if df["Order Date"].notna().sum() == 0:
+        raise ValueError("No valid Order Date values were found in orders.csv. Expected dates such as 11/8/2025.")
 except Exception as exc:
     st.error(f"Could not load the data: {exc}")
     st.stop()
@@ -59,8 +74,12 @@ except Exception as exc:
 valid_dates = df["Order Date"].dropna()
 with st.sidebar:
     st.header("Filters")
-    start, end = st.date_input("Order date range", value=(valid_dates.min().date(), valid_dates.max().date()),
-                               min_value=valid_dates.min().date(), max_value=valid_dates.max().date())
+    date_selection = st.date_input("Order date range", value=(valid_dates.min().date(), valid_dates.max().date()),
+                                   min_value=valid_dates.min().date(), max_value=valid_dates.max().date())
+    if not isinstance(date_selection, (tuple, list)) or len(date_selection) != 2:
+        st.info("Select both a start date and an end date.")
+        st.stop()
+    start, end = date_selection
     segments = st.multiselect("Customer segments", sorted(df["Segment"].dropna().unique()), default=sorted(df["Segment"].dropna().unique()))
     categories = st.multiselect("Product categories", sorted(df["Category"].dropna().unique()), default=sorted(df["Category"].dropna().unique()))
     st.caption("Category return rates count distinct orders per category; one order can belong to several categories.")
